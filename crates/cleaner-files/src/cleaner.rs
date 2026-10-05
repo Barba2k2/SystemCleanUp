@@ -8,7 +8,7 @@ use std::{
 };
 
 use cleaner_core::{
-  CandidateCategory, CandidateId, CandidatePreview, CandidateRisk, CleanupPreview, CleanupRequest,
+  CandidateCategory, CandidateId, CandidatePreview, CleanupPreview, CleanupRequest,
   CleanupResponse, DomainEvent, EventPublisher, OperationKind, PortError, PreviewId,
   PreviewRequest, ProgressEvent, RemovalCandidate, RemovalMode, ScanId, ScanRequest, ScanResponse,
 };
