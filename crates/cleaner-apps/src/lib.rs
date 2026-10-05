@@ -300,6 +300,7 @@ fn uninstall_platform_application(
   })
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn package_name_is_safe(value: &str) -> bool {
   !value.is_empty()
     && value.as_bytes()[0].is_ascii_alphanumeric()
@@ -355,6 +356,7 @@ fn plist_xml_string(xml: &str, key: &str) -> Option<String> {
   (!decoded.is_empty()).then(|| decoded.to_owned())
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn windows_entry_is_visible(display_name: Option<&str>, system_component: bool) -> bool {
   !system_component && display_name.is_some_and(|name| !name.trim().is_empty())
 }
