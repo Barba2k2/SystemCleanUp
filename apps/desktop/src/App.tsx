@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import {
   discoverApplications,
@@ -18,10 +19,18 @@ import {
   type ScanResponse,
   type UninstallResponse,
 } from "./api/cleaner";
+import LanguageSelector from "./design-system/LanguageSelector";
+import { Languages } from "./i18n/languages";
+import { useLanguageStore } from "./stores/languageStore";
 
 type View = "cleanup" | "applications";
 type FeedbackKind = "info" | "success" | "warning" | "error";
-type Feedback = { kind: FeedbackKind; message: string };
+type Feedback = {
+  kind: FeedbackKind;
+  key?: string;
+  params?: Record<string, unknown>;
+  raw?: string;
+};
 type ConfirmationAction =
   | { kind: "cleanup"; mode: RemovalMode }
   | { kind: "uninstall"; application: InstalledApplication };
@@ -33,34 +42,21 @@ const scanCategories: CandidateCategory[] = [
 ];
 const candidatesPerPage = 100;
 
-const categoryLabels: Record<CandidateCategory, string> = {
-  user_cache: "User cache",
-  user_temporary: "Temporary file",
-  diagnostic_log: "Diagnostic log",
-};
+const permanentConfirmationWord = "PERMANENT";
 
-const applicationSourceLabels: Record<InstalledApplication["source"], string> = {
-  mac_applications_directory: "macOS Applications directory",
-  windows_registry: "Windows registry",
-  windows_package_manager: "Windows package manager",
-  linux_package_manager: "Linux package manager",
-  linux_desktop_entry: "Linux desktop entry",
-  other: "Other source",
-};
-
-function getErrorMessage(error: unknown): string {
+function getErrorFeedback(error: unknown): Feedback {
   if (typeof error === "string") {
-    return error;
+    return { kind: "error", raw: error };
   }
 
   if (error instanceof Error) {
-    return error.message;
+    return { kind: "error", raw: error.message };
   }
 
-  return "The request failed. No operation result was returned.";
+  return { kind: "error", key: "feedback.genericError" };
 }
 
-function formatBytes(bytes: number): string {
+function formatBytes(bytes: number, locale: string): string {
   if (bytes < 1024) {
     return `${bytes} B`;
   }
@@ -74,21 +70,18 @@ function formatBytes(bytes: number): string {
     unitIndex += 1;
   }
 
-  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
-}
+  const formatted = new Intl.NumberFormat(locale, {
+    maximumFractionDigits: value >= 10 ? 0 : 1,
+    minimumFractionDigits: value >= 10 ? 0 : 1,
+  }).format(value);
 
-function getRiskLabel(risk: RemovalCandidate["risk"]): string {
-  switch (risk) {
-    case "low":
-      return "Low risk";
-    case "moderate":
-      return "Moderate risk";
-    case "high":
-      return "High risk";
-  }
+  return `${formatted} ${units[unitIndex]}`;
 }
 
 function App() {
+  const { t, i18n } = useTranslation();
+  const language = useLanguageStore((state) => state.language);
+  const setLanguage = useLanguageStore((state) => state.setLanguage);
   const [view, setView] = useState<View>("cleanup");
   const [scan, setScan] = useState<ScanResponse | null>(null);
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<Set<string>>(
@@ -151,17 +144,18 @@ function App() {
     setCandidatePage(1);
     setPreview(null);
     setCleanupResponse(null);
-    setFeedback({ kind: "info", message: "Scanning requested categories…" });
+    setFeedback({ kind: "info", key: "feedback.scanning" });
 
     try {
       const response = await scanCandidates({ categories: scanCategories });
       setScan(response);
       setFeedback({
         kind: "success",
-        message: `Scan returned ${response.candidates.length} candidate(s).`,
+        key: "feedback.scanDone",
+        params: { count: response.candidates.length },
       });
     } catch (error) {
-      setFeedback({ kind: "error", message: getErrorMessage(error) });
+      setFeedback(getErrorFeedback(error));
     } finally {
       setIsBusy(false);
     }
@@ -203,7 +197,7 @@ function App() {
     setProgress(null);
     setPreview(null);
     setCleanupResponse(null);
-    setFeedback({ kind: "info", message: "Checking the selected candidates…" });
+    setFeedback({ kind: "info", key: "feedback.checking" });
 
     try {
       const response = await prepareCleanupPreview({
@@ -211,12 +205,9 @@ function App() {
         selected_candidate_ids: [...selectedCandidateIds],
       });
       setPreview(response);
-      setFeedback({
-        kind: "success",
-        message: "Review results are ready. Blocked items cannot be executed.",
-      });
+      setFeedback({ kind: "success", key: "feedback.previewReady" });
     } catch (error) {
-      setFeedback({ kind: "error", message: getErrorMessage(error) });
+      setFeedback(getErrorFeedback(error));
     } finally {
       setIsBusy(false);
     }
@@ -228,20 +219,18 @@ function App() {
     setApplicationInventory(null);
     setSelectedApplicationId(null);
     setUninstallResponse(null);
-    setFeedback({
-      kind: "info",
-      message: "Requesting installed application inventory…",
-    });
+    setFeedback({ kind: "info", key: "feedback.inventoryRequesting" });
 
     try {
       const response = await discoverApplications({});
       setApplicationInventory(response);
       setFeedback({
         kind: "success",
-        message: `Inventory returned ${response.applications.length} application(s).`,
+        key: "feedback.inventoryDone",
+        params: { count: response.applications.length },
       });
     } catch (error) {
-      setFeedback({ kind: "error", message: getErrorMessage(error) });
+      setFeedback(getErrorFeedback(error));
     } finally {
       setIsBusy(false);
     }
@@ -275,10 +264,10 @@ function App() {
 
       setFeedback({
         kind: "info",
-        message:
+        key:
           action.mode === "trash"
-            ? "Sending eligible items to Trash…"
-            : "Requesting permanent cleanup…",
+            ? "feedback.sendingToTrash"
+            : "feedback.requestingPermanent",
       });
 
       try {
@@ -292,15 +281,20 @@ function App() {
           response.failed_candidate_ids.length > 0
             ? {
                 kind: "warning",
-                message: `The operation reported ${response.removed_candidate_ids.length} completed item(s) and ${response.failed_candidate_ids.length} failure(s).`,
+                key: "feedback.cleanupPartial",
+                params: {
+                  removed: response.removed_candidate_ids.length,
+                  failed: response.failed_candidate_ids.length,
+                },
               }
             : {
                 kind: "success",
-                message: `The operation reported ${response.removed_candidate_ids.length} completed item(s).`,
+                key: "feedback.cleanupDone",
+                params: { removed: response.removed_candidate_ids.length },
               },
         );
       } catch (error) {
-        setFeedback({ kind: "error", message: getErrorMessage(error) });
+        setFeedback(getErrorFeedback(error));
       } finally {
         setIsBusy(false);
         setConfirmationAction(null);
@@ -312,7 +306,8 @@ function App() {
 
     setFeedback({
       kind: "info",
-      message: `Requesting uninstall for ${action.application.name}…`,
+      key: "feedback.uninstallRequesting",
+      params: { name: action.application.name },
     });
 
     try {
@@ -323,17 +318,11 @@ function App() {
       setUninstallResponse(response);
       setFeedback(
         response.status === "completed"
-          ? {
-              kind: "success",
-              message: "The backend reports that uninstall completed.",
-            }
-          : {
-              kind: "info",
-              message: "The uninstall request was delegated to the system.",
-            },
+          ? { kind: "success", key: "feedback.uninstallCompleted" }
+          : { kind: "info", key: "feedback.uninstallDelegated" },
       );
     } catch (error) {
-      setFeedback({ kind: "error", message: getErrorMessage(error) });
+      setFeedback(getErrorFeedback(error));
     } finally {
       setIsBusy(false);
       setConfirmationAction(null);
@@ -344,12 +333,9 @@ function App() {
   async function copyPath(path: string) {
     try {
       await navigator.clipboard.writeText(path);
-      setFeedback({ kind: "success", message: "Path copied to clipboard." });
+      setFeedback({ kind: "success", key: "feedback.pathCopied" });
     } catch {
-      setFeedback({
-        kind: "error",
-        message: "The path could not be copied. Select the path text directly.",
-      });
+      setFeedback({ kind: "error", key: "feedback.pathCopyFailed" });
     }
   }
 
@@ -378,7 +364,7 @@ function App() {
   const canConfirmPermanent =
     confirmationAction?.kind !== "cleanup" ||
     confirmationAction.mode !== "permanent" ||
-    confirmationText === "PERMANENT";
+    confirmationText === permanentConfirmationWord;
 
   return (
     <div className="app-shell">
@@ -389,11 +375,11 @@ function App() {
           </div>
           <div>
             <p className="brand-name">System CleanUp</p>
-            <p className="brand-caption">Review first. Decide yourself.</p>
+            <p className="brand-caption">{t("brand.caption")}</p>
           </div>
         </div>
 
-        <nav className="primary-nav" aria-label="Primary navigation">
+        <nav className="primary-nav" aria-label={t("nav.ariaLabel")}>
           <button
             className={view === "cleanup" ? "nav-item active" : "nav-item"}
             type="button"
@@ -403,7 +389,7 @@ function App() {
             <span className="nav-icon" aria-hidden="true">
               ◫
             </span>
-            File cleanup
+            {t("nav.cleanup")}
           </button>
           <button
             className={
@@ -416,54 +402,67 @@ function App() {
             <span className="nav-icon" aria-hidden="true">
               ▦
             </span>
-            Applications
+            {t("nav.applications")}
           </button>
         </nav>
 
+        <LanguageSelector
+          label={t("language.label")}
+          value={language}
+          options={Languages.options.map((option) => ({
+            value: option.code,
+            label: option.name,
+          }))}
+          onChange={(value) => {
+            if (Languages.isSupported(value)) {
+              setLanguage(value);
+            }
+          }}
+        />
+
         <div className="sidebar-footer">
           <span className="status-dot" aria-hidden="true" />
-          Every action requires review
+          {t("sidebar.footer")}
         </div>
       </aside>
 
       <main className="main-content">
         <header className="topbar">
-          <span className="eyebrow">SYSTEM MAINTENANCE</span>
-          <span className="platform-label">Connected to native backend</span>
+          <span className="eyebrow">{t("topbar.eyebrow")}</span>
+          <span className="platform-label">{t("topbar.platform")}</span>
         </header>
 
         {view === "cleanup" ? (
           <section className="content-section" aria-labelledby="page-title">
             <div className="heading-row">
               <div>
-                <p className="eyebrow">FILE REVIEW</p>
-                <h1 id="page-title">Review files before cleanup.</h1>
-                <p className="page-description">
-                  Scan cache, temporary file, and diagnostic log categories.
-                  Select candidates, inspect the preview, then confirm the
-                  action.
-                </p>
+                <p className="eyebrow">{t("cleanup.eyebrow")}</p>
+                <h1 id="page-title">{t("cleanup.title")}</h1>
+                <p className="page-description">{t("cleanup.description")}</p>
               </div>
               <div className="safe-badge">
                 <span aria-hidden="true">✓</span>
-                Nothing runs without confirmation
+                {t("cleanup.safeBadge")}
               </div>
             </div>
 
             <div className="section-label-row">
               <div>
-                <h2>File candidates</h2>
-                <p>
-                  Candidates and warnings come from the platform adapter.
-                </p>
+                <h2>{t("cleanup.candidatesTitle")}</h2>
+                <p>{t("cleanup.candidatesSubtitle")}</p>
               </div>
               <span className="count-pill">
-                {scan ? `${scan.candidates.length} candidates` : "Not scanned"}
+                {scan
+                  ? t("cleanup.candidateCount", { count: scan.candidates.length })
+                  : t("cleanup.notScanned")}
               </span>
             </div>
 
             {scan?.warnings.length ? (
-              <WarningList title="Scan warnings" warnings={scan.warnings} />
+              <WarningList
+                title={t("cleanup.warningsTitle")}
+                warnings={scan.warnings}
+              />
             ) : null}
 
             {scan ? (
@@ -471,7 +470,9 @@ function App() {
                 <>
                   <div className="selection-toolbar">
                     <span>
-                      {selectedCandidateIds.size} selected across all pages
+                      {t("cleanup.selectedCount", {
+                        count: selectedCandidateIds.size,
+                      })}
                     </span>
                     <div className="toolbar-actions">
                       <button
@@ -480,7 +481,7 @@ function App() {
                         disabled={isBusy || pageCandidates.length === 0}
                         onClick={selectCurrentPage}
                       >
-                        Select all on this page
+                        {t("cleanup.selectPage")}
                       </button>
                       <button
                         className="text-button"
@@ -488,7 +489,7 @@ function App() {
                         disabled={isBusy || selectedCandidateIds.size === 0}
                         onClick={() => updateCandidateSelection(new Set())}
                       >
-                        Clear selection across all pages
+                        {t("cleanup.clearSelection")}
                       </button>
                     </div>
                   </div>
@@ -544,11 +545,8 @@ function App() {
                   <span className="empty-icon" aria-hidden="true">
                     ◫
                   </span>
-                  <h3>No candidates returned</h3>
-                  <p>
-                    The connected adapter returned no file candidates for the
-                    requested categories.
-                  </p>
+                  <h3>{t("cleanup.emptyNoCandidatesTitle")}</h3>
+                  <p>{t("cleanup.emptyNoCandidatesBody")}</p>
                 </div>
               )
             ) : (
@@ -556,11 +554,8 @@ function App() {
                 <span className="empty-icon" aria-hidden="true">
                   ◫
                 </span>
-                <h3>No scan results</h3>
-                <p>
-                  Run a scan to request file candidates from the connected
-                  platform adapter.
-                </p>
+                <h3>{t("cleanup.emptyNoScanTitle")}</h3>
+                <p>{t("cleanup.emptyNoScanBody")}</p>
               </div>
             )}
 
@@ -571,25 +566,25 @@ function App() {
                 disabled={isBusy}
                 onClick={() => void requestScan()}
               >
-                {isBusy ? "Working…" : scan ? "Scan again" : "Scan for candidates"}
+                {isBusy
+                  ? t("common.working")
+                  : scan
+                    ? t("cleanup.scanAgain")
+                    : t("cleanup.scan")}
                 <span aria-hidden="true">→</span>
               </button>
-              <span className="action-hint">
-                Scanning only retrieves candidates; it changes no files.
-              </span>
+              <span className="action-hint">{t("cleanup.scanHint")}</span>
             </div>
 
             {scan && scan.candidates.length > 0 ? (
               <section className="workflow-panel" aria-labelledby="preview-title">
                 <div className="section-label-row panel-heading">
                   <div>
-                    <h2 id="preview-title">Review selection</h2>
-                    <p>
-                      The backend checks selected IDs before any cleanup can run.
-                    </p>
+                    <h2 id="preview-title">{t("review.title")}</h2>
+                    <p>{t("review.subtitle")}</p>
                   </div>
                 </div>
-                <div className="mode-picker" role="group" aria-label="Cleanup mode">
+                <div className="mode-picker" role="group" aria-label={t("review.modeAriaLabel")}>
                   <button
                     className={
                       cleanupMode === "trash" ? "mode-option selected" : "mode-option"
@@ -599,8 +594,8 @@ function App() {
                     disabled={isBusy || cleanupResponse !== null}
                     onClick={() => setCleanupMode("trash")}
                   >
-                    <strong>Trash</strong>
-                    <span>Default · recoverable</span>
+                    <strong>{t("review.trashTitle")}</strong>
+                    <span>{t("review.trashSubtitle")}</span>
                   </button>
                   <button
                     className={
@@ -613,13 +608,19 @@ function App() {
                     disabled={isBusy || cleanupResponse !== null}
                     onClick={() => setCleanupMode("permanent")}
                   >
-                    <strong>Permanent</strong>
-                    <span>Irreversible cleanup</span>
+                    <strong>{t("review.permanentTitle")}</strong>
+                    <span>{t("review.permanentSubtitle")}</span>
                   </button>
                 </div>
                 <p className="mode-notice" role="note">
-                  <strong>Trash mode:</strong> Items remain recoverable. Disk
-                  space is not freed until you empty the Trash.
+                  <strong>
+                    {cleanupMode === "trash"
+                      ? t("review.trashNoticeLabel")
+                      : t("review.permanentNoticeLabel")}
+                  </strong>{" "}
+                  {cleanupMode === "trash"
+                    ? t("review.trashNoticeBody")
+                    : t("review.permanentNoticeBody")}
                 </p>
                 <div className="action-row review-actions">
                   <button
@@ -628,12 +629,10 @@ function App() {
                     disabled={isBusy || selectedCandidateIds.size === 0}
                     onClick={() => void requestPreview()}
                   >
-                    {isBusy ? "Checking…" : "Prepare preview"}
+                    {isBusy ? t("common.checking") : t("review.prepare")}
                   </button>
                   {!preview ? (
-                    <span className="action-hint">
-                      Select candidates to prepare a backend review.
-                    </span>
+                    <span className="action-hint">{t("review.prepareHint")}</span>
                   ) : null}
                 </div>
 
@@ -641,9 +640,11 @@ function App() {
                   <div className="preview-results">
                     <div className="preview-summary">
                       <span className="eligible-count">
-                        {eligibleCount} eligible
+                        {t("review.eligibleCount", { count: eligibleCount })}
                       </span>
-                      <span className="blocked-count">{blockedCount} blocked</span>
+                      <span className="blocked-count">
+                        {t("review.blockedCount", { count: blockedCount })}
+                      </span>
                     </div>
                     {preview.entries.length > 0 ? (
                       <div className="preview-list">
@@ -658,10 +659,7 @@ function App() {
                         ))}
                       </div>
                     ) : (
-                      <p className="inline-note">
-                        The backend returned no preview entries for the selected
-                        IDs.
-                      </p>
+                      <p className="inline-note">{t("review.noEntries")}</p>
                     )}
                     <div className="action-row review-actions">
                       <button
@@ -679,12 +677,12 @@ function App() {
                         onClick={openCleanupConfirmation}
                       >
                         {cleanupMode === "trash"
-                          ? "Move eligible items to Trash"
-                          : "Permanently clean eligible items"}
+                          ? t("review.moveToTrash")
+                          : t("review.cleanPermanently")}
                       </button>
                       {cleanupResponse ? (
                         <span className="action-hint">
-                          Scan again to start a new cleanup review.
+                          {t("review.scanAgainHint")}
                         </span>
                       ) : null}
                     </div>
@@ -710,34 +708,35 @@ function App() {
           <section className="content-section" aria-labelledby="page-title">
             <div className="heading-row">
               <div>
-                <p className="eyebrow">APPLICATION REVIEW</p>
-                <h1 id="page-title">Choose an application to uninstall.</h1>
+                <p className="eyebrow">{t("applications.eyebrow")}</p>
+                <h1 id="page-title">{t("applications.title")}</h1>
                 <p className="page-description">
-                  Review the installed application inventory, select one item,
-                  then confirm its native uninstall request.
+                  {t("applications.description")}
                 </p>
               </div>
               <div className="safe-badge">
                 <span aria-hidden="true">✓</span>
-                No usage-based guesses
+                {t("applications.safeBadge")}
               </div>
             </div>
 
             <div className="section-label-row">
               <div>
-                <h2>Installed applications</h2>
-                <p>Name, version, and discovery source are returned by the backend.</p>
+                <h2>{t("applications.listTitle")}</h2>
+                <p>{t("applications.listSubtitle")}</p>
               </div>
               <span className="count-pill">
                 {applicationInventory
-                  ? `${applicationInventory.applications.length} applications`
-                  : "Not loaded"}
+                  ? t("applications.count", {
+                      count: applicationInventory.applications.length,
+                    })
+                  : t("applications.notLoaded")}
               </span>
             </div>
 
             {applicationInventory?.warnings.length ? (
               <WarningList
-                title="Inventory warnings"
+                title={t("applications.warningsTitle")}
                 warnings={applicationInventory.warnings}
               />
             ) : null}
@@ -763,11 +762,8 @@ function App() {
                   <span className="empty-icon" aria-hidden="true">
                     ▦
                   </span>
-                  <h3>No applications returned</h3>
-                  <p>
-                    The connected adapter returned an empty installed application
-                    inventory.
-                  </p>
+                  <h3>{t("applications.emptyNoneTitle")}</h3>
+                  <p>{t("applications.emptyNoneBody")}</p>
                 </div>
               )
             ) : (
@@ -775,11 +771,8 @@ function App() {
                 <span className="empty-icon" aria-hidden="true">
                   ▦
                 </span>
-                <h3>Application inventory not loaded</h3>
-                <p>
-                  Request an inventory from the connected platform adapter. If
-                  the adapter is unsupported, its error will be shown here.
-                </p>
+                <h3>{t("applications.emptyNotLoadedTitle")}</h3>
+                <p>{t("applications.emptyNotLoadedBody")}</p>
               </div>
             )}
 
@@ -791,10 +784,10 @@ function App() {
                 onClick={() => void requestApplicationInventory()}
               >
                 {isBusy
-                  ? "Working…"
+                  ? t("common.working")
                   : applicationInventory
-                    ? "Refresh inventory"
-                    : "Load installed applications"}
+                    ? t("applications.refresh")
+                    : t("applications.load")}
                 <span aria-hidden="true">→</span>
               </button>
               <button
@@ -808,7 +801,7 @@ function App() {
                   openUninstallConfirmation(selectedApplication)
                 }
               >
-                Review uninstall
+                {t("applications.reviewUninstall")}
               </button>
             </div>
 
@@ -832,8 +825,8 @@ function App() {
         )}
 
         <footer className="main-footer">
-          <span>Local review workflow · Explicit confirmation for actions</span>
-          <span>Adapter support is reported by each operation</span>
+          <span>{t("footer.workflow")}</span>
+          <span>{t("footer.adapter")}</span>
         </footer>
       </main>
 
@@ -847,25 +840,29 @@ function App() {
           >
             {confirmationAction.kind === "cleanup" ? (
               <>
-                <p className="eyebrow">CLEANUP CONFIRMATION</p>
+                <p className="eyebrow">{t("confirm.cleanupEyebrow")}</p>
                 <h2 id="confirm-title">
                   {confirmationAction.mode === "trash"
-                    ? "Move eligible items to Trash?"
-                    : "Permanently clean eligible items?"}
+                    ? t("confirm.trashTitle")
+                    : t("confirm.permanentTitle")}
                 </h2>
                 <p>
-                  {eligibleCount} eligible item(s), totaling {formatBytes(eligibleBytes)},
-                  will be sent to the selected cleanup mode. Blocked items are
-                  excluded.
+                  {t("confirm.cleanupBody", {
+                    count: eligibleCount,
+                    size: formatBytes(eligibleBytes, i18n.language),
+                  })}
                 </p>
                 {confirmationAction.mode === "permanent" ? (
                   <>
                     <p className="permanent-warning">
-                      Permanent cleanup cannot be undone. Review the count and
-                      total size above before continuing.
+                      {t("confirm.permanentWarning")}
                     </p>
                     <label className="confirm-field">
-                      <span>Type PERMANENT to confirm irreversible cleanup.</span>
+                      <span>
+                        {t("confirm.typeToConfirm", {
+                          word: permanentConfirmationWord,
+                        })}
+                      </span>
                       <input
                         autoFocus
                         value={confirmationText}
@@ -879,25 +876,25 @@ function App() {
               </>
             ) : (
               <>
-                <p className="eyebrow">APPLICATION CONFIRMATION</p>
+                <p className="eyebrow">{t("confirm.applicationEyebrow")}</p>
                 <h2 id="confirm-title">
-                  Request uninstall for {confirmationAction.application.name}?
+                  {t("confirm.uninstallTitle", {
+                    name: confirmationAction.application.name,
+                  })}
                 </h2>
-                <p>
-                  The platform adapter may complete the uninstall or delegate
-                  the remaining steps to the operating system.
-                </p>
+                <p>{t("confirm.uninstallBody")}</p>
                 <dl className="confirm-meta">
                   <div>
-                    <dt>Version</dt>
-                    <dd>{confirmationAction.application.version ?? "Not provided"}</dd>
+                    <dt>{t("confirm.version")}</dt>
+                    <dd>
+                      {confirmationAction.application.version ??
+                        t("common.notProvided")}
+                    </dd>
                   </div>
                   <div>
-                    <dt>Source</dt>
+                    <dt>{t("confirm.source")}</dt>
                     <dd>
-                      {applicationSourceLabels[
-                        confirmationAction.application.source
-                      ]}
+                      {t(`source.${confirmationAction.application.source}`)}
                     </dd>
                   </div>
                 </dl>
@@ -913,7 +910,7 @@ function App() {
                   setConfirmationText("");
                 }}
               >
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 className={
@@ -927,12 +924,12 @@ function App() {
                 onClick={() => void confirmPendingAction()}
               >
                 {isBusy
-                  ? "Working…"
+                  ? t("common.working")
                   : confirmationAction.kind === "cleanup"
                     ? confirmationAction.mode === "trash"
-                      ? "Confirm move to Trash"
-                      : "Confirm permanent cleanup"
-                    : "Confirm uninstall request"}
+                      ? t("confirm.confirmTrash")
+                      : t("confirm.confirmPermanent")
+                    : t("confirm.confirmUninstall")}
               </button>
             </div>
           </section>
@@ -971,19 +968,26 @@ function CandidatePagination({
   onPrevious,
   onNext,
 }: CandidatePaginationProps) {
+  const { t } = useTranslation();
+
   return (
-    <nav className="candidate-pagination" aria-label="Candidate pages">
+    <nav className="candidate-pagination" aria-label={t("pagination.ariaLabel")}>
       <button
         className="pagination-button"
         type="button"
         disabled={disabled || currentPage <= 1}
         onClick={onPrevious}
       >
-        Previous
+        {t("pagination.previous")}
       </button>
       <span className="page-count" aria-live="polite">
-        Page {currentPage} of {totalPages} · Showing {firstItem}–{lastItem} of{" "}
-        {totalItems}
+        {t("pagination.info", {
+          current: currentPage,
+          total: totalPages,
+          first: firstItem,
+          last: lastItem,
+          totalItems,
+        })}
       </span>
       <button
         className="pagination-button"
@@ -991,7 +995,7 @@ function CandidatePagination({
         disabled={disabled || currentPage >= totalPages}
         onClick={onNext}
       >
-        Next
+        {t("pagination.next")}
       </button>
     </nav>
   );
@@ -1004,6 +1008,8 @@ function CandidateCard({
   onToggle,
   onCopyPath,
 }: CandidateCardProps) {
+  const { t, i18n } = useTranslation();
+
   return (
     <article className="candidate-card">
       <label className="candidate-select">
@@ -1014,20 +1020,20 @@ function CandidateCard({
           onChange={onToggle}
         />
         <span className="visually-hidden">
-          Select {candidate.path} for cleanup
+          {t("candidate.selectForCleanup", { path: candidate.path })}
         </span>
       </label>
       <div className="candidate-content">
         <div className="candidate-heading">
           <div className="candidate-labels">
             <span className="category-pill">
-              {categoryLabels[candidate.category]}
+              {t(`category.${candidate.category}`)}
             </span>
             <span className={`risk-pill ${candidate.risk}`}>
-              {getRiskLabel(candidate.risk)}
+              {t(`risk.${candidate.risk}`)}
             </span>
           </div>
-          <span className="candidate-size">{formatBytes(candidate.size_bytes)}</span>
+          <span className="candidate-size">{formatBytes(candidate.size_bytes, i18n.language)}</span>
         </div>
         <p className="candidate-reason">{candidate.reason}</p>
         <div className="path-row">
@@ -1035,7 +1041,7 @@ function CandidateCard({
             {candidate.path}
           </code>
           <button className="copy-button" type="button" onClick={onCopyPath}>
-            Copy path
+            {t("common.copyPath")}
           </button>
         </div>
       </div>
@@ -1051,6 +1057,7 @@ type PreviewEntryCardProps = {
 };
 
 function PreviewEntryCard({ entry, onCopyPath }: PreviewEntryCardProps) {
+  const { t, i18n } = useTranslation();
   const isEligible = entry.state === "eligible";
 
   return (
@@ -1060,15 +1067,15 @@ function PreviewEntryCard({ entry, onCopyPath }: PreviewEntryCardProps) {
       }
     >
       <div className="preview-entry-heading">
-        <strong>{isEligible ? "Eligible" : "Blocked"}</strong>
-        <span>{formatBytes(entry.candidate.size_bytes)}</span>
+        <strong>{isEligible ? t("review.eligible") : t("review.blocked")}</strong>
+        <span>{formatBytes(entry.candidate.size_bytes, i18n.language)}</span>
       </div>
       <div className="candidate-labels">
         <span className="category-pill">
-          {categoryLabels[entry.candidate.category]}
+          {t(`category.${entry.candidate.category}`)}
         </span>
         <span className={`risk-pill ${entry.candidate.risk}`}>
-          {getRiskLabel(entry.candidate.risk)}
+          {t(`risk.${entry.candidate.risk}`)}
         </span>
       </div>
       <p className="candidate-reason">{entry.candidate.reason}</p>
@@ -1080,7 +1087,7 @@ function PreviewEntryCard({ entry, onCopyPath }: PreviewEntryCardProps) {
           {entry.candidate.path}
         </code>
         <button className="copy-button" type="button" onClick={onCopyPath}>
-          Copy path
+          {t("common.copyPath")}
         </button>
       </div>
     </article>
@@ -1100,6 +1107,7 @@ function ApplicationCard({
   disabled,
   onSelect,
 }: ApplicationCardProps) {
+  const { t } = useTranslation();
   const uninstallAvailable = application.source !== "linux_desktop_entry";
 
   return (
@@ -1123,12 +1131,22 @@ function ApplicationCard({
       <span className="application-info">
         <strong>{application.name}</strong>
         <span className="application-meta">
-          <span>Version: {application.version ?? "Not provided"}</span>
-          <span>Source: {applicationSourceLabels[application.source]}</span>
+          <span>
+            {t("applications.version", {
+              value: application.version ?? t("common.notProvided"),
+            })}
+          </span>
+          <span>
+            {t("applications.source", {
+              value: t(`source.${application.source}`),
+            })}
+          </span>
         </span>
       </span>
       {!uninstallAvailable ? (
-        <span className="uninstall-unavailable">Uninstall unavailable</span>
+        <span className="uninstall-unavailable">
+          {t("applications.uninstallUnavailable")}
+        </span>
       ) : null}
     </label>
   );
@@ -1158,23 +1176,27 @@ type CleanupOutcomeProps = {
 };
 
 function CleanupOutcome({ response, candidateById }: CleanupOutcomeProps) {
+  const { t } = useTranslation();
+
   return (
     <section className="outcome-panel" aria-labelledby="cleanup-outcome-title">
-      <h2 id="cleanup-outcome-title">Cleanup response</h2>
+      <h2 id="cleanup-outcome-title">{t("outcome.cleanupTitle")}</h2>
       <p>
-        The backend reported {response.removed_candidate_ids.length} completed
-        item(s) and {response.failed_candidate_ids.length} failed item(s).
+        {t("outcome.cleanupBody", {
+          removed: response.removed_candidate_ids.length,
+          failed: response.failed_candidate_ids.length,
+        })}
       </p>
       {response.removed_candidate_ids.length > 0 ? (
         <CandidateOutcomeList
-          title="Completed items"
+          title={t("outcome.completedItems")}
           candidateIds={response.removed_candidate_ids}
           candidateById={candidateById}
         />
       ) : null}
       {response.failed_candidate_ids.length > 0 ? (
         <CandidateOutcomeList
-          title="Failed items"
+          title={t("outcome.failedItems")}
           candidateIds={response.failed_candidate_ids}
           candidateById={candidateById}
         />
@@ -1222,6 +1244,7 @@ type UninstallOutcomeProps = {
 };
 
 function UninstallOutcome({ response, application }: UninstallOutcomeProps) {
+  const { t } = useTranslation();
   const isCompleted = response.status === "completed";
 
   return (
@@ -1231,17 +1254,14 @@ function UninstallOutcome({ response, application }: UninstallOutcomeProps) {
       }
       aria-labelledby="uninstall-outcome-title"
     >
-      <h2 id="uninstall-outcome-title">Uninstall response</h2>
+      <h2 id="uninstall-outcome-title">{t("outcome.uninstallTitle")}</h2>
       <p className="outcome-status">
-        <strong>{isCompleted ? "Completed" : "Delegated to system"}</strong>
+        <strong>
+          {isCompleted ? t("outcome.completed") : t("outcome.delegated")}
+        </strong>
         {application ? ` · ${application.name}` : ` · ${response.application_id}`}
       </p>
-      {!isCompleted ? (
-        <p>
-          The operating system owns the remaining uninstall steps. This response
-          does not confirm that those steps have finished.
-        </p>
-      ) : null}
+      {!isCompleted ? <p>{t("outcome.delegatedBody")}</p> : null}
     </section>
   );
 }
@@ -1253,6 +1273,8 @@ type OperationStatusProps = {
 };
 
 function OperationStatus({ feedback, progress, isBusy }: OperationStatusProps) {
+  const { t } = useTranslation();
+
   if (!feedback && !(isBusy && progress)) {
     return null;
   }
@@ -1263,7 +1285,11 @@ function OperationStatus({ feedback, progress, isBusy }: OperationStatusProps) {
       role={feedback?.kind === "error" ? "alert" : "status"}
       aria-live={feedback?.kind === "error" ? "assertive" : "polite"}
     >
-      {feedback ? <span>{feedback.message}</span> : null}
+      {feedback ? (
+        <span>
+          {feedback.raw ?? (feedback.key ? t(feedback.key, feedback.params) : "")}
+        </span>
+      ) : null}
       {isBusy && progress ? (
         <div className="progress-copy">
           <span>{progress.message}</span>
@@ -1271,10 +1297,12 @@ function OperationStatus({ feedback, progress, isBusy }: OperationStatusProps) {
             <progress
               max={progress.total_units}
               value={Math.min(progress.completed_units, progress.total_units)}
-              aria-label="Operation progress"
+              aria-label={t("common.operationProgress")}
             />
           ) : (
-            <span>{progress.completed_units} completed</span>
+            <span>
+              {t("common.progressCompleted", { count: progress.completed_units })}
+            </span>
           )}
         </div>
       ) : null}
