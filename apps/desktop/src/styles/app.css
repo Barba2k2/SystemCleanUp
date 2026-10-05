@@ -1323,3 +1323,27 @@ button:disabled {
     padding: 11px 0;
   }
 }
+
+.language-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 10px;
+  color: #8892a0;
+  font-size: 12px;
+}
+
+.language-selector-control {
+  height: 36px;
+  padding: 0 8px;
+  color: #e6e9ef;
+  background: #161b24;
+  border: 1px solid #2a3140;
+  border-radius: 8px;
+  font: inherit;
+}
+
+.language-selector-control:focus-visible {
+  outline: 2px solid #6fbf9a;
+  outline-offset: 2px;
+}
